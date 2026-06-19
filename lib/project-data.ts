@@ -2,6 +2,7 @@ export type SourceItem = {
   name: string;
   chunk: string;
   score: number;
+  vectorScore?: number;
   tag: "Primary" | "Support";
   content: string;
 };
@@ -47,6 +48,14 @@ export type ProjectConfig = {
   };
   activities: ActivityItem[];
   tools: ToolCallItem[];
+  evals?: {
+    retrievalQuality: number;
+    retrievalQualityReasoning: string;
+    faithfulness: number;
+    faithfulnessReasoning: string;
+    citationAccuracy: number;
+    citationAccuracyReasoning: string;
+  };
 };
 
 export const projectsData: Record<string, ProjectConfig> = {

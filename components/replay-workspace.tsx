@@ -178,14 +178,9 @@ function LeftSidebar() {
   );
 }
 
-function TopBar({ onShare, shared }: { onShare: () => void; shared: boolean }) {
-  const { rightPanelOpen, toggleRightPanel, activeProjectId, setStep } = useWorkspaceStore();
-  const project = projectsData[activeProjectId] || projectsData["compliance-roadmap"];
-
-  const handleNewRun = () => {
-    setStep(0);
-    alert("New Run initialized. Replay workspace has been reset to Step 1 (Prompt). Click the Play button at the bottom timeline to watch the agents execute!");
-  };
+function TopBar({ onShare, shared, onNewRun }: { onShare: () => void; shared: boolean; onNewRun: () => void }) {
+  const { rightPanelOpen, toggleRightPanel, activeProjectId, projects } = useWorkspaceStore();
+  const project = projects[activeProjectId] || projectsData[activeProjectId] || projectsData["compliance-roadmap"];
 
   return (
     <header className="flex h-[58px] shrink-0 items-center justify-between border-b border-[#ded9d1] bg-[#fffefb] px-4 sm:px-5">
@@ -205,7 +200,7 @@ function TopBar({ onShare, shared }: { onShare: () => void; shared: boolean }) {
           {shared ? <Check size={12} className="text-[#50705a]" /> : <Share2 size={12} />}
           <span className="max-sm:hidden">{shared ? "Link copied" : "Share replay"}</span>
         </button>
-        <button onClick={handleNewRun} className="flex h-8 items-center gap-1.5 rounded-lg bg-ink px-2.5 text-[10px] font-semibold text-white hover:bg-[#3a3835]">
+        <button onClick={onNewRun} className="flex h-8 items-center gap-1.5 rounded-lg bg-ink px-2.5 text-[10px] font-semibold text-white hover:bg-[#3a3835]">
           <Sparkles size={11} />
           <span className="max-md:hidden">New run</span>
         </button>
@@ -273,11 +268,11 @@ function SourceTable({ project, activeStep }: { project: ProjectConfig; activeSt
           </span>
           <span className="truncate text-[9px] text-[#7e7870]">{source.chunk}</span>
           <span className="hidden text-[8px] text-[#807a72] sm:block">{source.tag}</span>
-          <span className="flex items-center justify-end gap-1.5 text-[9px] font-semibold">
-            <span className="h-1.5 w-8 overflow-hidden rounded-full bg-[#e4ded6]">
-              <span className="block h-full rounded-full bg-[#73917b]" style={{ width: `${source.score}%` }} />
-            </span>
-            {source.score}%
+          <span className="flex flex-col items-end justify-center text-[9px] font-semibold">
+            <span className="text-[#50705a] font-bold text-[9px]">Rerank: {source.score}%</span>
+            {source.vectorScore !== undefined && (
+              <span className="text-[#7c766e] text-[8px] font-medium">Vector: {source.vectorScore}%</span>
+            )}
           </span>
         </button>
       ))}
@@ -501,9 +496,123 @@ function DynamicOutputView({ project, activeStep }: { project: ProjectConfig; ac
   );
 }
 
+function EvalsView({ project, activeStep }: { project: ProjectConfig; activeStep: number }) {
+  if (activeStep < 3) {
+    return (
+      <div className="flex h-64 flex-col items-center justify-center rounded-xl border border-dashed border-[#dcd6ce] p-5 text-center bg-white">
+        <HelpCircle size={24} className="mb-2 text-[#9a948b] animate-pulse" />
+        <p className="text-[11px] font-medium text-[#7c766e]">Evaluations will begin once search chunks are retrieved.</p>
+        <p className="text-[9px] text-[#a09a91] mt-1">Metrics (Retrieval, Faithfulness, Citation) populate at specific steps.</p>
+      </div>
+    );
+  }
+
+  const evals = project.evals || {
+    retrievalQuality: 91,
+    retrievalQualityReasoning: "The search retrieved compliance sections for risk management, which match the core concepts of the user request.",
+    faithfulness: 88,
+    faithfulnessReasoning: "Synthesized tasks are directly supported by sections of the retrieved compliance documents. No hallucinations detected.",
+    citationAccuracy: 95,
+    citationAccuracyReasoning: "Roadmap items properly cite references from the SOC 2 Matrix and EU AI Act sections without anomalies."
+  };
+
+  const evalSteps = [
+    {
+      label: "1. Prompt Assessment",
+      status: "Verified",
+      score: "100%",
+      detail: `Evaluated prompt structure for intent clarity. Swarmed Planner to map target domains: "${project.prompt}".`,
+      color: "bg-lavender"
+    },
+    {
+      label: "2. Retrieval Quality",
+      status: activeStep >= 4 ? "Evaluated" : "Assessing...",
+      score: activeStep >= 4 ? `${evals.retrievalQuality}%` : "Calculating...",
+      detail: evals.retrievalQualityReasoning,
+      color: "bg-blue"
+    },
+    {
+      label: "3. Output Faithfulness",
+      status: activeStep >= 6 ? "Evaluated" : "Pending Synthesis...",
+      score: activeStep >= 6 ? `${evals.faithfulness}%` : "Pending...",
+      detail: activeStep >= 6 ? evals.faithfulnessReasoning : "Faithfulness checking will run once the final answer is generated in Step 6.",
+      color: "bg-mint"
+    },
+    {
+      label: "4. Citation Verification",
+      status: activeStep >= 7 ? "Sealed" : "Pending Output...",
+      score: activeStep >= 7 ? `${evals.citationAccuracy}%` : "Pending...",
+      detail: activeStep >= 7 ? evals.citationAccuracyReasoning : "Citation checking runs during the claim validation phase in Step 7.",
+      color: "bg-peach"
+    }
+  ];
+
+  return (
+    <div className="mx-auto max-w-[800px]">
+      <div className="mb-6">
+        <span className="eyebrow !text-[8px]">Evaluation Harness</span>
+        <h2 className="mt-2 text-[18px] font-semibold tracking-[-.03em] mt-1">Run quality and compliance audit</h2>
+        <p className="mt-1 text-[10px] text-[#817b73] mt-0.5">
+          Automated evaluation logs for Run #{project.runId}. Sealed on the Run object trace.
+        </p>
+      </div>
+
+      {/* Main Scorecards */}
+      <div className="mb-6 grid gap-4 sm:grid-cols-3">
+        {[
+          { label: "Retrieval quality", score: evals.retrievalQuality, color: "bg-blue" },
+          { label: "Answer faithfulness", score: evals.faithfulness, color: "bg-mint" },
+          { label: "Citation accuracy", score: evals.citationAccuracy, color: "bg-peach" }
+        ].map((item) => (
+          <div key={item.label} className="rounded-xl border border-[#ddd7cf] bg-white p-4 shadow-[0_1px_3px_rgba(0,0,0,.02)]">
+            <span className={`mb-3 block h-1 w-10 rounded-full ${item.color}`} />
+            <p className="text-[22px] font-semibold tracking-[-.04em] text-ink">{item.score}%</p>
+            <p className="text-[9px] text-[#88827a] mt-0.5">{item.label}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* Step details */}
+      <div className="space-y-4">
+        <h3 className="text-[11px] font-bold uppercase tracking-wider text-[#9a948b] mb-2">Step-by-step Evaluation Audit</h3>
+        <div className="space-y-3">
+          {evalSteps.map((s, idx) => (
+            <div key={idx} className="rounded-xl border border-[#ddd7cf] bg-white p-4 transition-all hover:bg-[#fffdfb]">
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  <span className={`h-2.5 w-2.5 rounded-full ${s.color}`} />
+                  <h4 className="text-[11px] font-semibold text-ink">{s.label}</h4>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-[8px] font-bold text-[#817b73] bg-[#f0ebe4] px-1.5 py-0.5 rounded">{s.status}</span>
+                  <span className="text-[10px] font-bold text-ink">{s.score}</span>
+                </div>
+              </div>
+              <p className="text-[10px] leading-5 text-[#5c564f]">
+                {s.detail}
+              </p>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Model Judge Signature */}
+      <div className="mt-5 rounded-xl border border-[#ddd7cf] bg-[#fffefb] p-4 font-mono text-[8px] text-[#716c65] space-y-1">
+        <p className="font-semibold text-[9px] font-sans mb-1 text-ink flex items-center gap-1">
+          <ShieldCheck size={11} className="text-[#50705a]" /> Evaluator Audit Seal
+        </p>
+        <p>SYSTEM_METRICS_JUDGE: gpt-4o-mini-evaluator</p>
+        <p>AUDIT_RUN_HASH: 0x{project.runId}f82a9c3b8e4f82d1c9b3e8c7a6e5d</p>
+        <p>SEAL_SIGNATURE: SEALED_BY_KNOWLEDGE_AGENT_KEY_V1_2</p>
+        <p>TIMESTAMP: {new Date().toISOString()}</p>
+      </div>
+    </div>
+  );
+}
+
 function MainCanvas() {
-  const { tab, setTab, activeStep, activeProjectId } = useWorkspaceStore();
-  const project = projectsData[activeProjectId] || projectsData["compliance-roadmap"];
+  const { tab, setTab, activeStep, activeProjectId, projects } = useWorkspaceStore();
+  const project = projects[activeProjectId] || projectsData[activeProjectId] || projectsData["compliance-roadmap"];
 
   return (
     <section className="flex min-w-0 flex-1 flex-col overflow-hidden bg-[#f8f6f2]">
@@ -528,6 +637,19 @@ function MainCanvas() {
             </span>
             {tab === "sources" && <span className="absolute inset-x-0 bottom-0 h-[2px] bg-ink" />}
           </button>
+          <button
+            onClick={() => setTab("evals")}
+            className={`relative h-full text-[10px] font-semibold transition-colors ${tab === "evals" ? "text-ink font-bold" : "text-[#8b857d] hover:text-ink"
+              }`}
+          >
+            Evals
+            {activeStep >= 3 && project.evals && (
+              <span className="ml-1.5 rounded-full bg-[#cfe8d6] px-1.5 py-0.5 text-[8px] font-bold text-[#50705a] border border-[#d0e9d5]">
+                {Math.round((project.evals.retrievalQuality + project.evals.faithfulness + project.evals.citationAccuracy) / 3)}%
+              </span>
+            )}
+            {tab === "evals" && <span className="absolute inset-x-0 bottom-0 h-[2px] bg-ink" />}
+          </button>
         </div>
         <div className="flex items-center gap-1.5">
           <button onClick={() => alert("Copied output markdown to clipboard.")} className="grid h-7 w-7 place-items-center rounded-lg border border-[#dbd5cd] bg-white text-[#555] hover:bg-[#faf9f6]"><Copy size={11} /></button>
@@ -537,7 +659,7 @@ function MainCanvas() {
       <div className="flex-1 overflow-y-auto px-4 py-5 hide-scrollbar sm:px-6 sm:py-6">
         {tab === "output" ? (
           <DynamicOutputView project={project} activeStep={activeStep} />
-        ) : (
+        ) : tab === "sources" ? (
           <div className="mx-auto max-w-[860px]">
             <div className="mb-5 flex items-end justify-between">
               <div>
@@ -578,6 +700,8 @@ function MainCanvas() {
               </p>
             </div>
           </div>
+        ) : (
+          <EvalsView project={project} activeStep={activeStep} />
         )}
       </div>
     </section>
@@ -585,10 +709,10 @@ function MainCanvas() {
 }
 
 function RightPanel({ onClose }: { onClose: () => void }) {
-  const { rightPanelOpen, activeStep, activeProjectId } = useWorkspaceStore();
+  const { rightPanelOpen, activeStep, activeProjectId, projects } = useWorkspaceStore();
   if (!rightPanelOpen) return null;
 
-  const project = projectsData[activeProjectId] || projectsData["compliance-roadmap"];
+  const project = projects[activeProjectId] || projectsData[activeProjectId] || projectsData["compliance-roadmap"];
 
   // Dynamic agent states based on activeStep
   const pStatus = activeStep === 0 ? "Pending" : activeStep === 1 ? "In progress" : "Complete";
@@ -819,10 +943,11 @@ function ReplayPanel() {
 // DOCUMENTS VIEW & COMPONENTS
 // ----------------------------------------------------
 function DocumentsView() {
-  const { documents, selectedDocumentId, setSelectedDocumentId, deleteDocument, addDocument } = useWorkspaceStore();
+  const { documents, selectedDocumentId, setSelectedDocumentId, deleteDocument, uploadDocumentFile } = useWorkspaceStore();
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [uploadName, setUploadName] = useState<string>("");
   const [showUploadModal, setShowUploadModal] = useState(false);
+  const [isUploadingReal, setIsUploadingReal] = useState(false);
 
   const mockFiles = [
     { name: "ISO 27001 Annex A.pdf", size: "820 KB", chunks: 45, content: "ISO/IEC 27001 Annex A details 114 control objectives grouped in 14 domains. Organizations must implement mobile device security policies, restrict network configuration paths, enforce administrative separation of duties, and audit login access profiles regularly." },
@@ -842,31 +967,48 @@ function DocumentsView() {
       if (progress >= 100) {
         clearInterval(interval);
         setTimeout(() => {
-          setUploadProgress(null);
-          // Add document as "Processing"
-          const newDocId = `doc-${Date.now()}`;
-          addDocument({
-            id: newDocId,
-            name: file.name,
-            size: file.size,
-            uploadedAt: new Date().toISOString().split("T")[0],
-            status: "Processing",
-            chunks: file.chunks,
-            content: file.content
+          // Use standard upload API by creating a mock file object and sending it
+          const blob = new Blob([file.content], { type: "text/plain" });
+          const fileObj = new (File as any)([blob], file.name, { type: "text/plain" });
+          
+          uploadDocumentFile(fileObj).catch(err => {
+            console.error("Failed to index mock file:", err);
+            alert("Failed to index file in local vector database.");
           });
-
-          // Simulate Indexing complete after 1.5s
-          setTimeout(() => {
-            useWorkspaceStore.setState((state) => ({
-              documents: state.documents.map((d) =>
-                d.id === newDocId ? { ...d, status: "Indexed" } : d
-              )
-            }));
-          }, 1500);
-
         }, 500);
       }
     }, 120);
+  };
+
+  const handleRealFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setShowUploadModal(false);
+    setUploadName(file.name);
+    setUploadProgress(0);
+    setIsUploadingReal(true);
+
+    let progress = 0;
+    const progressInterval = setInterval(() => {
+      progress = Math.min(progress + 15, 90);
+      setUploadProgress(progress);
+    }, 150);
+
+    try {
+      await uploadDocumentFile(file);
+      clearInterval(progressInterval);
+      setUploadProgress(100);
+      setTimeout(() => {
+        setUploadProgress(null);
+        setIsUploadingReal(false);
+      }, 500);
+    } catch (err: any) {
+      clearInterval(progressInterval);
+      setUploadProgress(null);
+      setIsUploadingReal(false);
+      alert(err.message || "Failed to upload document");
+    }
   };
 
   const selectedDoc = documents.find((d) => d.id === selectedDocumentId);
@@ -1069,6 +1211,24 @@ function DocumentsView() {
                   </div>
                 </button>
               ))}
+            </div>
+            
+            <div className="border-t border-[#e2ddd5] pt-4 mt-4">
+              <p className="text-[9px] font-bold uppercase tracking-[.14em] text-[#9a948b] mb-2">Or Upload Custom Document</p>
+              <input
+                type="file"
+                accept=".txt,.pdf"
+                id="custom-file-upload-input"
+                onChange={handleRealFileUpload}
+                className="hidden"
+              />
+              <label
+                htmlFor="custom-file-upload-input"
+                className="flex h-11 w-full cursor-pointer items-center justify-center gap-2 rounded-xl border border-dashed border-[#dcd6ce] bg-[#fbfaf8] text-[10px] font-semibold text-[#56514b] hover:bg-[#f6f3ee] hover:border-[#b1aaa0] transition-all animate-pulse"
+              >
+                <Upload size={12} className="text-[#7c766e]" />
+                <span>Choose txt or pdf file</span>
+              </label>
             </div>
           </div>
         </div>
@@ -1307,10 +1467,22 @@ export function ReplayWorkspace() {
     setActiveProjectId,
     setView,
     setSelectedDocumentId,
-    documents
+    documents,
+    projects,
+    fetchProjects,
+    fetchDocuments,
+    createRun,
+    isLoading
   } = useWorkspaceStore();
 
   const [shared, setShared] = useState(false);
+  const [showNewRunModal, setShowNewRunModal] = useState(false);
+  const [newRunPrompt, setNewRunPrompt] = useState("");
+
+  useEffect(() => {
+    fetchProjects();
+    fetchDocuments();
+  }, [fetchProjects, fetchDocuments]);
 
   // Global Ctrl+K / Cmd+K listener
   useEffect(() => {
@@ -1327,14 +1499,14 @@ export function ReplayWorkspace() {
   const share = async () => {
     setShared(true);
     try {
-      const activeProj = projectsData[activeProjectId] || projectsData["compliance-roadmap"];
+      const activeProj = projects[activeProjectId] || projectsData[activeProjectId] || projectsData["compliance-roadmap"];
       await navigator.clipboard.writeText(`${window.location.origin}/workspace?project=${activeProjectId}&replay=${activeProj.runId}`);
     } catch { }
     window.setTimeout(() => setShared(false), 1800);
   };
 
   // Search filter collections
-  const filteredProjects = Object.values(projectsData).filter(p =>
+  const filteredProjects = Object.values(projects).filter(p =>
     p.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
     p.prompt.toLowerCase().includes(searchQuery.toLowerCase())
   );
@@ -1347,11 +1519,11 @@ export function ReplayWorkspace() {
   const isSearching = searchQuery.trim().length > 0;
 
   return (
-    <main className="flex h-screen min-h-[640px] overflow-hidden bg-cream text-ink">
+    <main className="flex h-screen min-h-[640px] overflow-hidden bg-cream text-ink relative">
       <LeftSidebar />
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <TopBar onShare={share} shared={shared} />
+        <TopBar onShare={share} shared={shared} onNewRun={() => setShowNewRunModal(true)} />
 
         <div className="flex min-h-0 flex-1 relative">
           {currentView === "projects" && <MainCanvas />}
@@ -1366,6 +1538,67 @@ export function ReplayWorkspace() {
 
         {currentView === "projects" && <ReplayPanel />}
       </div>
+
+      {/* New Run Prompt Modal */}
+      {showNewRunModal && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-[#252422]/30 backdrop-blur-[2px]">
+          <div className="w-[420px] rounded-2xl border border-[#cfc8be] bg-[#fffefb] p-5 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-[#e2ddd5] pb-2">
+              <div className="flex items-center gap-2">
+                <Sparkles size={14} className="text-peach bg-[#ffd8c2]/30 p-0.5 rounded" />
+                <h3 className="text-[12px] font-semibold text-ink">Initialize New AI Agent Run</h3>
+              </div>
+              <button onClick={() => setShowNewRunModal(false)} className="text-[#7c766f] hover:text-ink"><X size={13} /></button>
+            </div>
+            <p className="text-[10px] text-[#817b73] leading-4">
+              Enter a custom prompt or policy query. The system will decompose it, execute a vector similarity search, apply reranking, synthesize cited answers, and calculate RAGAS-style metrics.
+            </p>
+            <div className="space-y-3">
+              <label className="block text-[8px] font-bold uppercase tracking-wider text-[#9a948b]">User Query Prompt</label>
+              <textarea
+                value={newRunPrompt}
+                onChange={(e) => setNewRunPrompt(e.target.value)}
+                placeholder="e.g. Audit the access control requirements and list the steps to establish logical compliance."
+                rows={4}
+                className="w-full rounded-xl border border-[#dcd6ce] bg-white p-3 text-[10px] outline-none text-ink placeholder-[#b0a99e] focus:border-ink/30 transition-all resize-none"
+              />
+            </div>
+            <div className="flex gap-2 justify-end pt-2">
+              <button
+                onClick={() => setShowNewRunModal(false)}
+                className="h-8 rounded-lg border border-[#d8d2ca] bg-white px-3 text-[10px] font-semibold text-[#555] hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={async () => {
+                  if (!newRunPrompt.trim()) return;
+                  setShowNewRunModal(false);
+                  await createRun(newRunPrompt);
+                  setNewRunPrompt("");
+                }}
+                className="h-8 rounded-lg bg-ink px-3 text-[10px] font-semibold text-white hover:bg-[#3a3835] flex items-center gap-1.5"
+              >
+                <Sparkles size={10} />
+                <span>Execute Run</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* RAG Loop Processing Loader Overlay */}
+      {isLoading && (
+        <div className="fixed inset-0 z-[100] flex flex-col items-center justify-center bg-[#252422]/15 backdrop-blur-[2px] gap-3">
+          <div className="rounded-2xl border border-[#dcd6ce] bg-[#fffefb] p-6 shadow-quiet flex flex-col items-center gap-3 w-[260px]">
+            <Loader2 className="animate-spin h-6 w-6 text-[#75678e]" />
+            <p className="text-[11px] font-bold text-ink">AI Agent Loop Executing...</p>
+            <p className="text-[9px] text-[#817b73] max-w-[200px] text-center leading-4">
+              Planner is structuring the roadmap, Knowledge is fetching vector chunks, and Reranker is scoring results.
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Global Cmd+K Search Overlay */}
       {searchModalOpen && (

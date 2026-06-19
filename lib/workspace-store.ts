@@ -1,6 +1,7 @@
 import { create } from "zustand";
+import { ProjectConfig } from "./project-data";
 
-export type PanelTab = "output" | "sources";
+export type PanelTab = "output" | "sources" | "evals";
 export type WorkspaceView = "projects" | "documents" | "timeline" | "all-runs" | "needs-review";
 
 export type DocumentItem = {
@@ -29,6 +30,8 @@ export type WorkspaceState = {
   searchQuery: string;
   searchModalOpen: boolean;
   documents: DocumentItem[];
+  projects: Record<string, ProjectConfig>;
+  isLoading: boolean;
   
   // Auth Session State
   user: UserSession | null;
@@ -45,8 +48,13 @@ export type WorkspaceState = {
   setSelectedDocumentId: (id: string | null) => void;
   setSearchQuery: (query: string) => void;
   setSearchModalOpen: (open: boolean) => void;
-  addDocument: (doc: DocumentItem) => void;
-  deleteDocument: (id: string) => void;
+  
+  // API Sync Actions
+  fetchProjects: () => Promise<void>;
+  fetchDocuments: () => Promise<void>;
+  uploadDocumentFile: (file: File) => Promise<DocumentItem>;
+  deleteDocument: (id: string) => Promise<void>;
+  createRun: (prompt: string) => Promise<void>;
 
   // Auth Session Actions
   signIn: (email: string, password: string) => boolean;
@@ -55,46 +63,7 @@ export type WorkspaceState = {
   signOut: () => void;
 };
 
-const defaultDocs: DocumentItem[] = [
-  {
-    id: "doc-1",
-    name: "EU AI Act — Controls.pdf",
-    size: "1.4 MB",
-    uploadedAt: "2026-06-12",
-    status: "Indexed",
-    chunks: 142,
-    content: "The EU Artificial Intelligence Act sets out rules for risk management and transparency in AI systems. High-risk systems require rigorous data governance, detailed logging, and human oversight. Article 4.2 specifically highlights controls around security, risk mitigation, and systemic reviews to ensure transparency and accountability."
-  },
-  {
-    id: "doc-2",
-    name: "SOC 2 Control Matrix.pdf",
-    size: "450 KB",
-    uploadedAt: "2026-06-14",
-    status: "Indexed",
-    chunks: 68,
-    content: "SOC 2 CC6.1 specifies logical access security controls. Organizations must manage credentials, implement quarterly access reviews, and establish vendor compliance criteria. Auditable evidence must be recorded for authorization changes, system logging, and vulnerability management cycles."
-  },
-  {
-    id: "doc-3",
-    name: "Data Retention Policy.pdf",
-    size: "320 KB",
-    uploadedAt: "2026-06-15",
-    status: "Indexed",
-    chunks: 24,
-    content: "Under Section 12 of the Data Retention Policy, user prompt logs, retriever tokens, and model outputs must be stored securely for at least 7 years. These records are subject to compliance reviews. Access to raw logging data must be restricted to authorized auditors."
-  },
-  {
-    id: "doc-4",
-    name: "Vendor Security Standard.pdf",
-    size: "890 KB",
-    uploadedAt: "2026-06-16",
-    status: "Indexed",
-    chunks: 89,
-    content: "Section 7 of the Vendor Security Standard defines the review cadence for external subprocessors. Third-party risk assessments must be updated annually or upon material changes to data flows. The builder system must capture and verify data sharing citations automatically before synthesis."
-  }
-];
-
-export const useWorkspaceStore = create<WorkspaceState>((set) => ({
+export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   activeStep: 7, // Default to complete state
   playing: false,
   tab: "output",
@@ -104,7 +73,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   selectedDocumentId: null,
   searchQuery: "",
   searchModalOpen: false,
-  documents: defaultDocs,
+  documents: [],
+  projects: {},
+  isLoading: false,
 
   // Auth Session initial state
   user: null, // Start logged out
@@ -121,20 +92,101 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   setSelectedDocumentId: (selectedDocumentId) => set({ selectedDocumentId }),
   setSearchQuery: (searchQuery) => set({ searchQuery }),
   setSearchModalOpen: (searchModalOpen) => set({ searchModalOpen }),
-  addDocument: (doc) => set((state) => ({ documents: [doc, ...state.documents] })),
-  deleteDocument: (id) => set((state) => ({ 
-    documents: state.documents.filter(doc => doc.id !== id),
-    selectedDocumentId: state.selectedDocumentId === id ? null : state.selectedDocumentId
-  })),
+
+  fetchProjects: async () => {
+    try {
+      set({ isLoading: true });
+      const res = await fetch("/api/projects");
+      if (res.ok) {
+        const data = await res.json();
+        set({ projects: data });
+      }
+    } catch (err) {
+      console.error("Failed to fetch projects from backend:", err);
+    } finally {
+      set({ isLoading: false });
+    }
+  },
+
+  fetchDocuments: async () => {
+    try {
+      const res = await fetch("/api/documents");
+      if (res.ok) {
+        const data = await res.json();
+        set({ documents: data });
+      }
+    } catch (err) {
+      console.error("Failed to fetch documents from backend:", err);
+    }
+  },
+
+  uploadDocumentFile: async (file: File) => {
+    const formData = new FormData();
+    formData.append("file", file);
+
+    const res = await fetch("/api/documents", {
+      method: "POST",
+      body: formData
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || "File upload failed");
+    }
+
+    const doc = await res.json();
+    await get().fetchDocuments();
+    return doc;
+  },
+
+  deleteDocument: async (id: string) => {
+    const res = await fetch(`/api/documents?id=${id}`, {
+      method: "DELETE"
+    });
+    if (res.ok) {
+      await get().fetchDocuments();
+      if (get().selectedDocumentId === id) {
+        set({ selectedDocumentId: null });
+      }
+    }
+  },
+
+  createRun: async (prompt: string) => {
+    try {
+      set({ isLoading: true });
+      const activeProjId = get().activeProjectId;
+      
+      const res = await fetch("/api/runs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId: activeProjId, prompt })
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || "Run execution failed");
+      }
+
+      const updatedProject = await res.json();
+      set((state) => ({
+        projects: { ...state.projects, [activeProjId]: updatedProject },
+        activeStep: 0, // Reset step to 0 to watch replay
+        playing: true, // Auto-play the replay!
+        tab: "output"  // Focus on AI Output view
+      }));
+    } catch (err: any) {
+      alert(err.message || "Failed to execute prompt on active documents.");
+    } finally {
+      set({ isLoading: false });
+    }
+  },
 
   // Auth Actions
   signIn: (email, password) => {
-    // Standard test credentials
     if (email === "asha@acme.com" && password === "password123") {
       set({ user: { email: "asha@acme.com", name: "Asha Singh" } });
       return true;
     }
-    // Allow standard admin credentials
     if (email === "admin@ledger.ai" && password === "admin123") {
       set({ user: { email: "admin@ledger.ai", name: "Admin Team" } });
       return true;
@@ -150,9 +202,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   },
 
   verifyOtp: (code) => {
-    // The user specified OTP must be exactly "864114"
     if (code === "864114") {
-      const state = useWorkspaceStore.getState();
+      const state = get();
       if (state.tempSignUpData) {
         set({ 
           user: { 
@@ -172,3 +223,4 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     set({ user: null, otpSentToEmail: null, tempSignUpData: null });
   }
 }));
+
