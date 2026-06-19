@@ -4,17 +4,18 @@
 
 ## Product model
 
-The primary object is a **Run**: an immutable record of a user prompt, agent plan, retrieved context, tool calls, generated output, and verification result. A run can be replayed step by step or shared as a read-only evidence link.
+The primary object is a **Run**: an immutable record of a user prompt, agent plan, retrieved context, tool calls, generated output, verification result, and evaluation scores. A run can be replayed step by step or shared as a read-only evidence link.
 
 ### Core user flow
 
 1. The user creates a project and uploads policy, compliance, or research documents.
-2. The user asks Ledger to complete a task, such as creating a compliance roadmap.
-3. Planner decomposes the task into explicit steps.
-4. Knowledge retrieves and ranks source chunks, exposing confidence and selection rationale.
-5. Builder creates a cited artifact from the approved context.
-6. Ledger verifies claims and records the full execution trace.
-7. The user reviews the output, replays any step, and shares the run.
+2. Documents are chunked and embedded, with vectors stored in pgvector.
+3. The user asks Ledger to complete a task, such as creating a compliance roadmap.
+4. Planner decomposes the task into explicit steps.
+5. Knowledge retrieves source chunks via pgvector similarity search, reranks them with a cross-encoder, and exposes confidence, rerank score, and selection rationale.
+6. Builder creates a cited artifact from the approved context.
+7. Ledger verifies claims, scores the run with an automated eval harness (retrieval quality, answer faithfulness, citation accuracy), and records the full execution trace.
+8. The user reviews the output, inspects eval scores, replays any step, and shares the run.
 
 ## Information architecture
 
@@ -27,6 +28,7 @@ Ledger AI
 │   │   ├── Sources / retrieval trace
 │   │   ├── Agent activity
 │   │   ├── Tool calls
+│   │   ├── Evals
 │   │   └── Replay timeline
 │   └── Project settings
 ├── Documents
@@ -64,7 +66,8 @@ RootLayout
     ├── RightPanel
     │   ├── AgentStatus
     │   ├── ActivityFeed
-    │   └── ToolCalls
+    │   ├── ToolCalls
+    │   └── EvalScores
     └── ReplayPanel
         ├── TransportControls
         └── StepTimeline
@@ -104,11 +107,25 @@ RootLayout
 - Compliance roadmap run workspace
 - AI output with claim-level citations
 - RAG source and confidence inspector
+- Eval scores panel (retrieval quality, faithfulness, citation accuracy)
 - Planner, Knowledge, and Builder status cards
 - Activity and tool call panels
 - Interactive replay timeline
 - Global search command surface
 - Share replay feedback state
+
+## Retrieval and evaluation pipeline
+
+Ledger AI's Knowledge agent is backed by a real retrieval pipeline rather than mocked source matching:
+
+- **Chunking** — uploaded documents are split into overlapping text chunks with metadata (source, page, position).
+- **Embeddings** — chunks are embedded and stored in **pgvector**, enabling similarity search over project documents.
+- **Reranking** — top-k vector search results are reordered with a cross-encoder reranker before being surfaced to the Builder agent.
+- **Evals** — each run is scored automatically using a **RAGAS**-based harness across three dimensions:
+  - *Retrieval quality* — whether the right chunks were selected for the task.
+  - *Answer faithfulness* — whether the generated output is supported by retrieved context.
+  - *Citation accuracy* — whether claims in the output trace back correctly to source chunks.
+- **Persistence** — eval scores are stored as part of the immutable run trace, alongside model/version metadata and input/output hashes, so they replay and audit consistently with every other run step.
 
 ## Technical implementation
 
@@ -117,6 +134,9 @@ RootLayout
 - Tailwind CSS
 - Zustand for replay and panel state
 - Lucide icons
+- pgvector for embedding storage and similarity search
+- Cross-encoder reranking on retrieved chunks
+- RAGAS for automated retrieval and faithfulness evals
 
 ### Run locally
 
@@ -129,5 +149,4 @@ Open `http://localhost:3000` for the landing page and `http://localhost:3000/wor
 
 ## Production backend contract
 
-The UI is structured for a FastAPI service with PostgreSQL and pgvector. A production API would expose projects, documents, runs, run steps, retrieval matches, agent events, tool calls, and share links as first-class resources. Each run step should be append-only and carry model/version metadata, input/output hashes, timestamps, and actor identity so replay remains reproducible and auditable.
-
+The UI is structured for a FastAPI service with PostgreSQL and pgvector. The production API exposes projects, documents, runs, run steps, retrieval matches, rerank scores, eval scores, agent events, tool calls, and share links as first-class resources. Each run step is append-only and carries model/version metadata, input/output hashes, timestamps, and actor identity so replay remains reproducible and auditable.
