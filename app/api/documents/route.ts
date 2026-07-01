@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
-import * as pdf from "pdf-parse";
 import { db } from "@/lib/db";
 import { getEmbedding } from "@/lib/embeddings";
-import { DocumentItem } from "@/lib/workspace-store";
+import type { DocumentItem } from "@/lib/workspace-store";
+
+export const dynamic = "force-dynamic";
 
 // Chunker helper
 function chunkText(text: string, size = 500, overlap = 100): string[] {
@@ -25,7 +26,7 @@ export async function GET() {
     return NextResponse.json(docs);
   } catch (err: any) {
     console.error("GET documents failed:", err);
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return NextResponse.json({ error: err?.message || "Internal Server Error" }, { status: 500 });
   }
 }
 
@@ -48,7 +49,8 @@ export async function POST(req: Request) {
 
     // Parse depending on file type
     if (name.endsWith(".pdf")) {
-      const parseFunc = (pdf as any).default || pdf;
+      const pdfModule = await import("pdf-parse");
+      const parseFunc = (pdfModule as any).default || pdfModule;
       const parsedPdf = await parseFunc(buffer);
       textContent = parsedPdf.text;
     } else {

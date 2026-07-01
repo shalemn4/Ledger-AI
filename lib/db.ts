@@ -77,10 +77,17 @@ class Database {
   constructor() {
     // Check if Postgres is configured
     if (process.env.DATABASE_URL) {
-      this.pgPool = new Pool({
-        connectionString: process.env.DATABASE_URL,
-        ssl: process.env.DATABASE_URL.includes("localhost") ? false : { rejectUnauthorized: false }
-      });
+      try {
+        this.pgPool = new Pool({
+          connectionString: process.env.DATABASE_URL,
+          ssl: process.env.DATABASE_URL.includes("localhost") ? false : { rejectUnauthorized: false },
+          connectionTimeoutMillis: 3000,
+          query_timeout: 5000
+        });
+      } catch (err) {
+        console.warn("Failed to construct pg Pool:", err);
+        this.pgPool = null;
+      }
     }
   }
 
