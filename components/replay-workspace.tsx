@@ -551,8 +551,8 @@ function EvalsView({ project, activeStep }: { project: ProjectConfig; activeStep
     <div className="mx-auto max-w-[800px]">
       <div className="mb-6">
         <span className="eyebrow !text-[8px]">Evaluation Harness</span>
-        <h2 className="mt-2 text-[18px] font-semibold tracking-[-.03em] mt-1">Run quality and compliance audit</h2>
-        <p className="mt-1 text-[10px] text-[#817b73] mt-0.5">
+        <h2 className="mt-2 text-[18px] font-semibold tracking-[-.03em]">Run quality and compliance audit</h2>
+        <p className="mt-1 text-[10px] text-[#817b73]">
           Automated evaluation logs for Run #{project.runId}. Sealed on the Run object trace.
         </p>
       </div>
