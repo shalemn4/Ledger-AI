@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
-import { Client } from "pg";
+import os from "os";
+import { Pool } from "pg";
 import { ProjectConfig, projectsData } from "./project-data";
 import { DocumentItem } from "./workspace-store";
 
@@ -12,7 +13,16 @@ export type DbChunk = {
   embedding: number[];
 };
 
-const DB_DIR = path.join(process.cwd(), "data");
+const isServerless = Boolean(
+  process.env.VERCEL ||
+  process.env.AWS_LAMBDA_FUNCTION_NAME ||
+  process.env.NODE_ENV === "production"
+);
+
+const DB_DIR = isServerless
+  ? path.join(os.tmpdir(), "ledger-ai-data")
+  : path.join(process.cwd(), "data");
+
 const JSON_DB_PATH = path.join(DB_DIR, "db.json");
 
 // Default docs to initialize in the DB
@@ -56,13 +66,18 @@ const defaultDocs: DocumentItem[] = [
 ];
 
 class Database {
-  private pgClient: Client | null = null;
+  private pgPool: Pool | null = null;
   private isInitialized = false;
+  private memoryDb: {
+    documents: DocumentItem[];
+    document_chunks: DbChunk[];
+    projects: Record<string, ProjectConfig>;
+  } | null = null;
 
   constructor() {
     // Check if Postgres is configured
     if (process.env.DATABASE_URL) {
-      this.pgClient = new Client({
+      this.pgPool = new Pool({
         connectionString: process.env.DATABASE_URL,
         ssl: process.env.DATABASE_URL.includes("localhost") ? false : { rejectUnauthorized: false }
       });
@@ -72,14 +87,16 @@ class Database {
   public async initialize(): Promise<void> {
     if (this.isInitialized) return;
 
-    if (this.pgClient) {
+    if (this.pgPool) {
       try {
-        await this.pgClient.connect();
-        // Enable pgvector
-        await this.pgClient.query("CREATE EXTENSION IF NOT EXISTS vector;");
+        await this.pgPool.query("SELECT 1;");
+        try {
+          await this.pgPool.query("CREATE EXTENSION IF NOT EXISTS vector;");
+        } catch (extErr) {
+          console.warn("Notice: Could not automatically create vector extension:", (extErr as Error).message);
+        }
         
-        // Create tables
-        await this.pgClient.query(`
+        await this.pgPool.query(`
           CREATE TABLE IF NOT EXISTS documents (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
@@ -91,9 +108,8 @@ class Database {
           );
         `);
 
-        // Check the current embedding dimension (OpenAI uses 1536 by default)
         const embedDim = process.env.OPENAI_API_KEY ? 1536 : 128;
-        await this.pgClient.query(`
+        await this.pgPool.query(`
           CREATE TABLE IF NOT EXISTS document_chunks (
             id TEXT PRIMARY KEY,
             document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
@@ -103,7 +119,7 @@ class Database {
           );
         `);
 
-        await this.pgClient.query(`
+        await this.pgPool.query(`
           CREATE TABLE IF NOT EXISTS projects (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
@@ -119,8 +135,7 @@ class Database {
           );
         `);
 
-        // Check if DB is empty, pre-populate if true
-        const docRes = await this.pgClient.query("SELECT COUNT(*) FROM documents;");
+        const docRes = await this.pgPool.query("SELECT COUNT(*) FROM documents;");
         if (parseInt(docRes.rows[0].count, 10) === 0) {
           await this.prepopulatePostgres();
         }
@@ -129,59 +144,73 @@ class Database {
         console.log("Database initialized (Postgres Mode)");
         return;
       } catch (err) {
-        console.warn("Failed to connect to Postgres, falling back to local JSON mode:", err);
-        this.pgClient = null;
+        console.warn("Failed to connect or initialize Postgres, falling back to local JSON/memory mode:", err);
+        this.pgPool = null;
       }
     }
 
-    // JSON Fallback initialization
-    if (!fs.existsSync(DB_DIR)) {
-      fs.mkdirSync(DB_DIR, { recursive: true });
-    }
+    // JSON / Memory Fallback initialization
+    if (!this.memoryDb) {
+      try {
+        if (fs.existsSync(JSON_DB_PATH)) {
+          this.memoryDb = JSON.parse(fs.readFileSync(JSON_DB_PATH, "utf8"));
+        }
+      } catch (err) {
+        console.warn("Could not read JSON_DB_PATH:", err);
+      }
 
-    if (!fs.existsSync(JSON_DB_PATH)) {
-      this.writeJsonDb({
-        documents: defaultDocs,
-        document_chunks: this.generateDefaultChunks(),
-        projects: projectsData
-      });
+      if (!this.memoryDb) {
+        const bundledDbPath = path.join(process.cwd(), "data", "db.json");
+        try {
+          if (fs.existsSync(bundledDbPath) && bundledDbPath !== JSON_DB_PATH) {
+            this.memoryDb = JSON.parse(fs.readFileSync(bundledDbPath, "utf8"));
+          }
+        } catch (err) {
+          console.warn("Could not read bundled data/db.json:", err);
+        }
+      }
+
+      if (!this.memoryDb) {
+        this.memoryDb = {
+          documents: defaultDocs,
+          document_chunks: this.generateDefaultChunks(),
+          projects: projectsData
+        };
+      }
+
+      this.writeJsonDb(this.memoryDb);
     }
 
     this.isInitialized = true;
-    console.log("Database initialized (Local JSON Mode)");
+    console.log("Database initialized (Local JSON/Memory Mode)");
   }
 
   // --- Postgres Prepopulation ---
   private async prepopulatePostgres(): Promise<void> {
-    if (!this.pgClient) return;
+    if (!this.pgPool) return;
 
-    // 1. Insert default documents
     for (const doc of defaultDocs) {
-      await this.pgClient.query(
-        "INSERT INTO documents (id, name, size, uploaded_at, status, chunks, content) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+      await this.pgPool.query(
+        "INSERT INTO documents (id, name, size, uploaded_at, status, chunks, content) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (id) DO NOTHING;",
         [doc.id, doc.name, doc.size, doc.uploadedAt, doc.status, doc.chunks, doc.content]
       );
     }
 
-    // 2. Insert default chunks
     const chunks = this.generateDefaultChunks();
     for (const chunk of chunks) {
-      // Convert vector to PG vector string format: '[v1, v2, ...]'
-      // Since PG table was created with embedDim, we ensure the array matches size
       const embedDim = process.env.OPENAI_API_KEY ? 1536 : 128;
       const embedding = chunk.embedding.slice(0, embedDim);
       while (embedding.length < embedDim) embedding.push(0);
 
-      await this.pgClient.query(
-        "INSERT INTO document_chunks (id, document_id, chunk_index, content, embedding) VALUES ($1, $2, $3, $4, $5)",
+      await this.pgPool.query(
+        "INSERT INTO document_chunks (id, document_id, chunk_index, content, embedding) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO NOTHING;",
         [chunk.id, chunk.documentId, chunk.chunkIndex, chunk.content, `[${embedding.join(",")}]`]
       );
     }
 
-    // 3. Insert default projects
     for (const [id, proj] of Object.entries(projectsData)) {
-      await this.pgClient.query(
-        "INSERT INTO projects (id, name, run_id, prompt, metadata, agent_label, plan, output, activities, tools, evals) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+      await this.pgPool.query(
+        "INSERT INTO projects (id, name, run_id, prompt, metadata, agent_label, plan, output, activities, tools, evals) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ON CONFLICT (id) DO NOTHING;",
         [
           proj.id,
           proj.name,
@@ -202,149 +231,203 @@ class Database {
   // --- Document Methods ---
   public async getDocuments(): Promise<DocumentItem[]> {
     await this.initialize();
-    if (this.pgClient) {
-      const res = await this.pgClient.query("SELECT * FROM documents ORDER BY uploaded_at DESC;");
-      return res.rows.map(row => ({
-        id: row.id,
-        name: row.name,
-        size: row.size,
-        uploadedAt: row.uploaded_at,
-        status: row.status as any,
-        chunks: row.chunks,
-        content: row.content
-      }));
-    } else {
-      return this.readJsonDb().documents;
+    if (this.pgPool) {
+      try {
+        const res = await this.pgPool.query("SELECT * FROM documents ORDER BY uploaded_at DESC;");
+        return res.rows.map(row => ({
+          id: row.id,
+          name: row.name,
+          size: row.size,
+          uploadedAt: row.uploaded_at,
+          status: row.status as any,
+          chunks: row.chunks,
+          content: row.content
+        }));
+      } catch (err) {
+        console.warn("Postgres error in getDocuments, falling back to JSON:", err);
+      }
     }
+    return this.readJsonDb().documents;
   }
 
   public async getDocument(id: string): Promise<DocumentItem | null> {
     await this.initialize();
-    if (this.pgClient) {
-      const res = await this.pgClient.query("SELECT * FROM documents WHERE id = $1;", [id]);
-      if (res.rows.length === 0) return null;
-      const row = res.rows[0];
-      return {
-        id: row.id,
-        name: row.name,
-        size: row.size,
-        uploadedAt: row.uploaded_at,
-        status: row.status as any,
-        chunks: row.chunks,
-        content: row.content
-      };
-    } else {
-      const db = this.readJsonDb();
-      return db.documents.find((d: DocumentItem) => d.id === id) || null;
+    if (this.pgPool) {
+      try {
+        const res = await this.pgPool.query("SELECT * FROM documents WHERE id = $1;", [id]);
+        if (res.rows.length === 0) return null;
+        const row = res.rows[0];
+        return {
+          id: row.id,
+          name: row.name,
+          size: row.size,
+          uploadedAt: row.uploaded_at,
+          status: row.status as any,
+          chunks: row.chunks,
+          content: row.content
+        };
+      } catch (err) {
+        console.warn("Postgres error in getDocument, falling back to JSON:", err);
+      }
     }
+    const db = this.readJsonDb();
+    return db.documents.find((d: DocumentItem) => d.id === id) || null;
   }
 
   public async addDocument(doc: DocumentItem): Promise<void> {
     await this.initialize();
-    if (this.pgClient) {
-      await this.pgClient.query(
-        "INSERT INTO documents (id, name, size, uploaded_at, status, chunks, content) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, chunks = EXCLUDED.chunks;",
-        [doc.id, doc.name, doc.size, doc.uploadedAt, doc.status, doc.chunks, doc.content]
-      );
-    } else {
-      const db = this.readJsonDb();
-      db.documents = [doc, ...db.documents.filter((d: DocumentItem) => d.id !== doc.id)];
-      this.writeJsonDb(db);
+    if (this.pgPool) {
+      try {
+        await this.pgPool.query(
+          "INSERT INTO documents (id, name, size, uploaded_at, status, chunks, content) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, chunks = EXCLUDED.chunks;",
+          [doc.id, doc.name, doc.size, doc.uploadedAt, doc.status, doc.chunks, doc.content]
+        );
+        return;
+      } catch (err) {
+        console.warn("Postgres error in addDocument, falling back to JSON:", err);
+      }
     }
+    const db = this.readJsonDb();
+    db.documents = [doc, ...db.documents.filter((d: DocumentItem) => d.id !== doc.id)];
+    this.writeJsonDb(db);
   }
 
   public async deleteDocument(id: string): Promise<void> {
     await this.initialize();
-    if (this.pgClient) {
-      await this.pgClient.query("DELETE FROM documents WHERE id = $1;", [id]);
-    } else {
-      const db = this.readJsonDb();
-      db.documents = db.documents.filter((d: DocumentItem) => d.id !== id);
-      db.document_chunks = db.document_chunks.filter((c: DbChunk) => c.documentId !== id);
-      this.writeJsonDb(db);
+    if (this.pgPool) {
+      try {
+        await this.pgPool.query("DELETE FROM documents WHERE id = $1;", [id]);
+        return;
+      } catch (err) {
+        console.warn("Postgres error in deleteDocument, falling back to JSON:", err);
+      }
     }
+    const db = this.readJsonDb();
+    db.documents = db.documents.filter((d: DocumentItem) => d.id !== id);
+    db.document_chunks = db.document_chunks.filter((c: DbChunk) => c.documentId !== id);
+    this.writeJsonDb(db);
   }
 
   // --- Chunk Methods ---
   public async addDocumentChunks(chunks: DbChunk[]): Promise<void> {
     await this.initialize();
-    if (this.pgClient) {
-      const embedDim = process.env.OPENAI_API_KEY ? 1536 : 128;
-      for (const chunk of chunks) {
-        const embedding = chunk.embedding.slice(0, embedDim);
-        while (embedding.length < embedDim) embedding.push(0);
+    if (this.pgPool) {
+      try {
+        const embedDim = process.env.OPENAI_API_KEY ? 1536 : 128;
+        for (const chunk of chunks) {
+          const embedding = chunk.embedding.slice(0, embedDim);
+          while (embedding.length < embedDim) embedding.push(0);
 
-        await this.pgClient.query(
-          "INSERT INTO document_chunks (id, document_id, chunk_index, content, embedding) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO NOTHING;",
-          [chunk.id, chunk.documentId, chunk.chunkIndex, chunk.content, `[${embedding.join(",")}]`]
-        );
+          await this.pgPool.query(
+            "INSERT INTO document_chunks (id, document_id, chunk_index, content, embedding) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO NOTHING;",
+            [chunk.id, chunk.documentId, chunk.chunkIndex, chunk.content, `[${embedding.join(",")}]`]
+          );
+        }
+        return;
+      } catch (err) {
+        console.warn("Postgres error in addDocumentChunks, falling back to JSON:", err);
       }
-    } else {
-      const db = this.readJsonDb();
-      db.document_chunks.push(...chunks);
-      this.writeJsonDb(db);
     }
+    const db = this.readJsonDb();
+    db.document_chunks.push(...chunks);
+    this.writeJsonDb(db);
   }
 
   public async getDocumentChunks(documentId: string): Promise<DbChunk[]> {
     await this.initialize();
-    if (this.pgClient) {
-      const res = await this.pgClient.query("SELECT * FROM document_chunks WHERE document_id = $1 ORDER BY chunk_index ASC;", [documentId]);
-      return res.rows.map(row => ({
-        id: row.id,
-        documentId: row.document_id,
-        chunkIndex: row.chunk_index,
-        content: row.content,
-        embedding: this.parsePgVector(row.embedding)
-      }));
-    } else {
-      return this.readJsonDb().document_chunks.filter((c: DbChunk) => c.documentId === documentId);
-    }
-  }
-
-  public async getSimilaritySearchResults(queryEmbedding: number[], limit = 4): Promise<Array<{ chunk: DbChunk, similarity: number }>> {
-    await this.initialize();
-    if (this.pgClient) {
-      const embedDim = process.env.OPENAI_API_KEY ? 1536 : 128;
-      const embedding = queryEmbedding.slice(0, embedDim);
-      while (embedding.length < embedDim) embedding.push(0);
-
-      // pgvector cosine distance operator is <=> (1 - cosine similarity)
-      const res = await this.pgClient.query(
-        `SELECT c.*, 1 - (c.embedding <=> $1) as similarity 
-         FROM document_chunks c 
-         ORDER BY c.embedding <=> $1 
-         LIMIT $2;`,
-        [`[${embedding.join(",")}]`, limit]
-      );
-      return res.rows.map(row => ({
-        chunk: {
+    if (this.pgPool) {
+      try {
+        const res = await this.pgPool.query("SELECT * FROM document_chunks WHERE document_id = $1 ORDER BY chunk_index ASC;", [documentId]);
+        return res.rows.map(row => ({
           id: row.id,
           documentId: row.document_id,
           chunkIndex: row.chunk_index,
           content: row.content,
           embedding: this.parsePgVector(row.embedding)
-        },
-        similarity: row.similarity
-      }));
-    } else {
-      const chunks = this.readJsonDb().document_chunks;
-      const scores = chunks.map((chunk: DbChunk) => {
-        const sim = this.cosineSimilarity(queryEmbedding, chunk.embedding);
-        return { chunk, similarity: sim };
-      });
-      return scores.sort((a: any, b: any) => b.similarity - a.similarity).slice(0, limit);
+        }));
+      } catch (err) {
+        console.warn("Postgres error in getDocumentChunks, falling back to JSON:", err);
+      }
     }
+    return this.readJsonDb().document_chunks.filter((c: DbChunk) => c.documentId === documentId);
+  }
+
+  public async getSimilaritySearchResults(queryEmbedding: number[], limit = 4): Promise<Array<{ chunk: DbChunk, similarity: number }>> {
+    await this.initialize();
+    if (this.pgPool) {
+      try {
+        const embedDim = process.env.OPENAI_API_KEY ? 1536 : 128;
+        const embedding = queryEmbedding.slice(0, embedDim);
+        while (embedding.length < embedDim) embedding.push(0);
+
+        const res = await this.pgPool.query(
+          `SELECT c.*, 1 - (c.embedding <=> $1) as similarity 
+           FROM document_chunks c 
+           ORDER BY c.embedding <=> $1 
+           LIMIT $2;`,
+          [`[${embedding.join(",")}]`, limit]
+        );
+        return res.rows.map(row => ({
+          chunk: {
+            id: row.id,
+            documentId: row.document_id,
+            chunkIndex: row.chunk_index,
+            content: row.content,
+            embedding: this.parsePgVector(row.embedding)
+          },
+          similarity: row.similarity
+        }));
+      } catch (err) {
+        console.warn("Postgres error in getSimilaritySearchResults, falling back to JSON:", err);
+      }
+    }
+    const chunks = this.readJsonDb().document_chunks;
+    const scores = chunks.map((chunk: DbChunk) => {
+      const sim = this.cosineSimilarity(queryEmbedding, chunk.embedding);
+      return { chunk, similarity: sim };
+    });
+    return scores.sort((a: any, b: any) => b.similarity - a.similarity).slice(0, limit);
   }
 
   // --- Project / Run Methods ---
   public async getProjects(): Promise<Record<string, ProjectConfig>> {
     await this.initialize();
-    if (this.pgClient) {
-      const res = await this.pgClient.query("SELECT * FROM projects;");
-      const data: Record<string, ProjectConfig> = {};
-      for (const row of res.rows) {
-        data[row.id] = {
+    if (this.pgPool) {
+      try {
+        const res = await this.pgPool.query("SELECT * FROM projects;");
+        const data: Record<string, ProjectConfig> = {};
+        for (const row of res.rows) {
+          data[row.id] = {
+            id: row.id,
+            name: row.name,
+            runId: row.run_id,
+            prompt: row.prompt,
+            metadata: row.metadata,
+            agentLabel: row.agent_label,
+            sources: await this.getSourcesForProject(row.id),
+            plan: row.plan,
+            output: typeof row.output === "string" ? JSON.parse(row.output) : row.output,
+            activities: typeof row.activities === "string" ? JSON.parse(row.activities) : row.activities,
+            tools: typeof row.tools === "string" ? JSON.parse(row.tools) : row.tools,
+            evals: row.evals ? (typeof row.evals === "string" ? JSON.parse(row.evals) : row.evals) : undefined
+          };
+        }
+        return data;
+      } catch (err) {
+        console.warn("Postgres error in getProjects, falling back to JSON:", err);
+      }
+    }
+    return this.readJsonDb().projects;
+  }
+
+  public async getProject(id: string): Promise<ProjectConfig | null> {
+    await this.initialize();
+    if (this.pgPool) {
+      try {
+        const res = await this.pgPool.query("SELECT * FROM projects WHERE id = $1;", [id]);
+        if (res.rows.length === 0) return null;
+        const row = res.rows[0];
+        return {
           id: row.id,
           name: row.name,
           runId: row.run_id,
@@ -358,98 +441,100 @@ class Database {
           tools: typeof row.tools === "string" ? JSON.parse(row.tools) : row.tools,
           evals: row.evals ? (typeof row.evals === "string" ? JSON.parse(row.evals) : row.evals) : undefined
         };
+      } catch (err) {
+        console.warn("Postgres error in getProject, falling back to JSON:", err);
       }
-      return data;
-    } else {
-      return this.readJsonDb().projects;
     }
-  }
-
-  public async getProject(id: string): Promise<ProjectConfig | null> {
-    await this.initialize();
-    if (this.pgClient) {
-      const res = await this.pgClient.query("SELECT * FROM projects WHERE id = $1;", [id]);
-      if (res.rows.length === 0) return null;
-      const row = res.rows[0];
-      return {
-        id: row.id,
-        name: row.name,
-        runId: row.run_id,
-        prompt: row.prompt,
-        metadata: row.metadata,
-        agentLabel: row.agent_label,
-        sources: await this.getSourcesForProject(row.id),
-        plan: row.plan,
-        output: typeof row.output === "string" ? JSON.parse(row.output) : row.output,
-        activities: typeof row.activities === "string" ? JSON.parse(row.activities) : row.activities,
-        tools: typeof row.tools === "string" ? JSON.parse(row.tools) : row.tools,
-        evals: row.evals ? (typeof row.evals === "string" ? JSON.parse(row.evals) : row.evals) : undefined
-      };
-    } else {
-      const db = this.readJsonDb();
-      return db.projects[id] || null;
-    }
+    const db = this.readJsonDb();
+    return db.projects[id] || null;
   }
 
   public async saveProject(id: string, proj: ProjectConfig): Promise<void> {
     await this.initialize();
-    if (this.pgClient) {
-      // Store PG record
-      await this.pgClient.query(
-        `INSERT INTO projects (id, name, run_id, prompt, metadata, agent_label, plan, output, activities, tools, evals) 
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) 
-         ON CONFLICT (id) DO UPDATE SET 
-           run_id = EXCLUDED.run_id,
-           prompt = EXCLUDED.prompt,
-           metadata = EXCLUDED.metadata,
-           plan = EXCLUDED.plan,
-           output = EXCLUDED.output,
-           activities = EXCLUDED.activities,
-           tools = EXCLUDED.tools,
-           evals = EXCLUDED.evals;`,
-        [
-          proj.id,
-          proj.name,
-          proj.runId,
-          proj.prompt,
-          proj.metadata,
-          proj.agentLabel,
-          proj.plan,
-          JSON.stringify(proj.output),
-          JSON.stringify(proj.activities),
-          JSON.stringify(proj.tools),
-          proj.evals ? JSON.stringify(proj.evals) : null
-        ]
-      );
-    } else {
-      const db = this.readJsonDb();
-      db.projects[id] = proj;
-      this.writeJsonDb(db);
+    if (this.pgPool) {
+      try {
+        await this.pgPool.query(
+          `INSERT INTO projects (id, name, run_id, prompt, metadata, agent_label, plan, output, activities, tools, evals) 
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) 
+           ON CONFLICT (id) DO UPDATE SET 
+             run_id = EXCLUDED.run_id,
+             prompt = EXCLUDED.prompt,
+             metadata = EXCLUDED.metadata,
+             plan = EXCLUDED.plan,
+             output = EXCLUDED.output,
+             activities = EXCLUDED.activities,
+             tools = EXCLUDED.tools,
+             evals = EXCLUDED.evals;`,
+          [
+            proj.id,
+            proj.name,
+            proj.runId,
+            proj.prompt,
+            proj.metadata,
+            proj.agentLabel,
+            proj.plan,
+            JSON.stringify(proj.output),
+            JSON.stringify(proj.activities),
+            JSON.stringify(proj.tools),
+            proj.evals ? JSON.stringify(proj.evals) : null
+          ]
+        );
+        return;
+      } catch (err) {
+        console.warn("Postgres error in saveProject, falling back to JSON:", err);
+      }
     }
+    const db = this.readJsonDb();
+    db.projects[id] = proj;
+    this.writeJsonDb(db);
   }
 
   private async getSourcesForProject(projectId: string): Promise<any[]> {
-    // Return sources. In full DB, project sources are derived, but for our simple runs
-    // we can preserve them in the project output config.
-    const res = await this.pgClient!.query("SELECT output FROM projects WHERE id = $1;", [projectId]);
-    if (res.rows.length > 0) {
-      const output = typeof res.rows[0].output === "string" ? JSON.parse(res.rows[0].output) : res.rows[0].output;
-      return output.sources || [];
+    if (!this.pgPool) return [];
+    try {
+      const res = await this.pgPool.query("SELECT output FROM projects WHERE id = $1;", [projectId]);
+      if (res.rows.length > 0) {
+        const output = typeof res.rows[0].output === "string" ? JSON.parse(res.rows[0].output) : res.rows[0].output;
+        return output.sources || [];
+      }
+    } catch {
+      // Ignore
     }
     return [];
   }
 
   // --- Helper Methods ---
   private readJsonDb(): { documents: DocumentItem[], document_chunks: DbChunk[], projects: Record<string, ProjectConfig> } {
-    try {
-      return JSON.parse(fs.readFileSync(JSON_DB_PATH, "utf8"));
-    } catch {
-      return { documents: [], document_chunks: [], projects: {} };
+    if (this.memoryDb) {
+      return this.memoryDb;
     }
+    try {
+      if (fs.existsSync(JSON_DB_PATH)) {
+        this.memoryDb = JSON.parse(fs.readFileSync(JSON_DB_PATH, "utf8"));
+        return this.memoryDb!;
+      }
+    } catch {
+      // Ignore read errors
+    }
+    const defaultData = {
+      documents: defaultDocs,
+      document_chunks: this.generateDefaultChunks(),
+      projects: projectsData
+    };
+    this.memoryDb = defaultData;
+    return defaultData;
   }
 
   private writeJsonDb(data: any): void {
-    fs.writeFileSync(JSON_DB_PATH, JSON.stringify(data, null, 2), "utf8");
+    this.memoryDb = data;
+    try {
+      if (!fs.existsSync(DB_DIR)) {
+        fs.mkdirSync(DB_DIR, { recursive: true });
+      }
+      fs.writeFileSync(JSON_DB_PATH, JSON.stringify(data, null, 2), "utf8");
+    } catch (err) {
+      console.warn("Notice: File system write failed (using in-memory store):", (err as Error).message);
+    }
   }
 
   private cosineSimilarity(a: number[], b: number[]): number {
