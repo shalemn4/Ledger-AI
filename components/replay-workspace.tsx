@@ -876,9 +876,7 @@ function ReplayPanel() {
       if (current >= steps.length - 1) {
         setPlaying(false);
       } else {
-        useWorkspaceStore.getState().setStep(current + 1);
-        // Force state playing true because setStep turns it false
-        useWorkspaceStore.setState({ playing: true });
+        useWorkspaceStore.setState({ activeStep: current + 1 });
       }
     }, 1500);
     return () => window.clearInterval(timer);

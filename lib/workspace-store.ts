@@ -83,7 +83,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   tempSignUpData: null,
 
   setStep: (activeStep) => set({ activeStep, playing: false }),
-  togglePlaying: () => set((state) => ({ playing: !state.playing })),
+  togglePlaying: () => set((state) => {
+    if (state.playing) {
+      return { playing: false };
+    } else {
+      const nextStep = state.activeStep >= 7 ? 0 : state.activeStep;
+      return { activeStep: nextStep, playing: true };
+    }
+  }),
   setPlaying: (playing) => set({ playing }),
   setTab: (tab) => set({ tab }),
   toggleRightPanel: () => set((state) => ({ rightPanelOpen: !state.rightPanelOpen })),
