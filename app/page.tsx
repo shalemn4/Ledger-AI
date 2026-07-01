@@ -287,7 +287,16 @@ function ProductPreview({ demoStep, demoPlaying, setDemoStep, setDemoPlaying }: 
             <div className="mb-2 flex items-center justify-between">
               <div className="flex items-center gap-2 text-[9px] font-semibold text-ink">
                 <button
-                  onClick={() => setDemoPlaying(!demoPlaying)}
+                  onClick={() => {
+                    if (demoPlaying) {
+                      setDemoPlaying(false);
+                    } else {
+                      if (demoStep >= demoSteps.length - 1) {
+                        setDemoStep(0);
+                      }
+                      setDemoPlaying(true);
+                    }
+                  }}
                   className="p-1 hover:bg-[#e4ded6] rounded transition-colors"
                 >
                   {demoPlaying ? <Pause size={9} fill="currentColor" /> : <Play size={9} fill="currentColor" />}
