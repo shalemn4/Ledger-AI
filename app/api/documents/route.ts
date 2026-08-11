@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { getEmbedding } from "@/lib/embeddings";
 import type { DocumentItem } from "@/lib/workspace-store";
+import { PDFParse } from "pdf-parse";
 
 export const dynamic = "force-dynamic";
 
@@ -44,14 +45,15 @@ export async function POST(req: Request) {
     const uploadedAt = new Date().toISOString().split("T")[0];
 
     // Read file buffer
-    const buffer = Buffer.from(await file.arrayBuffer());
+    const arrayBuffer = await file.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
     let textContent = "";
 
     // Parse depending on file type
     if (name.endsWith(".pdf")) {
-      const pdfModule = await import("pdf-parse");
-      const parseFunc = (pdfModule as any).default || pdfModule;
-      const parsedPdf = await parseFunc(buffer);
+      const uint8Array = new Uint8Array(arrayBuffer);
+      const parser = new PDFParse(uint8Array);
+      const parsedPdf = await parser.getText();
       textContent = parsedPdf.text;
     } else {
       // Default to plain text

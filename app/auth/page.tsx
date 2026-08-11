@@ -41,7 +41,7 @@ export default function AuthPage() {
       if (success) {
         router.push("/workspace");
       } else {
-        setError("Invalid email or password. Hint: Use asha@acme.com / password123");
+        setError("Invalid email or password.");
       }
     }, 800);
   };
@@ -58,7 +58,7 @@ export default function AuthPage() {
     setLoading(true);
 
     setTimeout(() => {
-      signUp(name, email);
+      signUp(name, email, password);
       setLoading(false);
       setMode("otp");
       setOtp(["", "", "", "", "", ""]);
@@ -104,20 +104,20 @@ export default function AuthPage() {
       if (success) {
         router.push("/workspace");
       } else {
-        setError("Invalid verification code. Hint: Use the code 864114");
+        setError("Invalid verification code.");
       }
     }, 800);
   };
 
   // Pre-fill helper functions for easy demo
   const prefillSignIn = () => {
-    setEmail("asha@acme.com");
+    setEmail("john@acme.com");
     setPassword("password123");
   };
 
   const prefillSignUp = () => {
-    setName("Asha Singh");
-    setEmail("asha@acme.com");
+    setName("John Doe");
+    setEmail("john@acme.com");
     setPassword("password123");
   };
 
@@ -161,7 +161,7 @@ export default function AuthPage() {
               <p className="text-[10px] text-[#716c65]">
                 {mode === "signin" && "Decisions, documented. Access your AI workspace."}
                 {mode === "signup" && "Get started with auditable and replayed AI workflows."}
-                {mode === "otp" && `We sent a security code to your registered email.`}
+                {mode === "otp" && `We sent a security code to your registered email (hint: use any 6 digits).`}
               </p>
             </div>
 
@@ -186,7 +186,7 @@ export default function AuthPage() {
                       value={email}
                       onChange={(e) => setEmail(e.target.value)}
                       className="h-10 w-full rounded-xl border border-[#ded8d0] pl-10 pr-4 text-[11px] outline-none focus:border-ink transition-colors"
-                      placeholder="asha@acme.com"
+                      placeholder="john@acme.com"
                     />
                   </div>
                 </div>
@@ -221,7 +221,7 @@ export default function AuthPage() {
                     onClick={prefillSignIn}
                     className="text-[9px] font-semibold text-[#8b7ca4] hover:underline"
                   >
-                    Quick fill test credentials (asha@acme.com)
+                    Quick fill test credentials (john@acme.com)
                   </button>
                 </div>
               </form>
@@ -241,7 +241,7 @@ export default function AuthPage() {
                       value={name}
                       onChange={(e) => setName(e.target.value)}
                       className="h-10 w-full rounded-xl border border-[#ded8d0] pl-10 pr-4 text-[11px] outline-none focus:border-ink transition-colors"
-                      placeholder="Asha Singh"
+                      placeholder="John Doe"
                     />
                   </div>
                 </div>
@@ -257,7 +257,7 @@ export default function AuthPage() {
                       value={email}
                       onChange={(e) => setEmail(e.target.value)}
                       className="h-10 w-full rounded-xl border border-[#ded8d0] pl-10 pr-4 text-[11px] outline-none focus:border-ink transition-colors"
-                      placeholder="asha@acme.com"
+                      placeholder="john@acme.com"
                     />
                   </div>
                 </div>
@@ -328,7 +328,7 @@ export default function AuthPage() {
                 <div className="rounded-lg border border-[#e4ded6] bg-[#fbfaf8] p-3 text-center space-y-1">
                   <p className="text-[8px] font-bold uppercase tracking-wider text-[#8b857d]">Verification Help</p>
                   <p className="text-[9px] text-[#6f6c66] leading-4">
-                    Enter the code <strong className="font-mono text-ink">864114</strong> to complete your verification checklist.
+                    Enter any 6-digit code to complete your verification checklist.
                   </p>
                 </div>
 

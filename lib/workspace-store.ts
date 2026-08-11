@@ -36,7 +36,8 @@ export type WorkspaceState = {
   // Auth Session State
   user: UserSession | null;
   otpSentToEmail: string | null;
-  tempSignUpData: { name: string; email: string } | null;
+  tempSignUpData: { name: string; email: string; password?: string } | null;
+  registeredUsers: { email: string; name: string; password?: string }[];
 
   setStep: (step: number) => void;
   togglePlaying: () => void;
@@ -58,7 +59,7 @@ export type WorkspaceState = {
 
   // Auth Session Actions
   signIn: (email: string, password: string) => boolean;
-  signUp: (name: string, email: string) => void;
+  signUp: (name: string, email: string, password?: string) => void;
   verifyOtp: (code: string) => boolean;
   signOut: () => void;
 };
@@ -81,6 +82,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   user: null, // Start logged out
   otpSentToEmail: null,
   tempSignUpData: null,
+  registeredUsers: [
+    { email: "john@acme.com", name: "John Doe", password: "password123" },
+    { email: "admin@ledger.ai", name: "Admin Team", password: "admin123" }
+  ],
 
   setStep: (activeStep) => set({ activeStep, playing: false }),
   togglePlaying: () => set((state) => {
@@ -190,33 +195,40 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
   // Auth Actions
   signIn: (email, password) => {
-    if (email === "asha@acme.com" && password === "password123") {
-      set({ user: { email: "asha@acme.com", name: "Asha Singh" } });
-      return true;
-    }
-    if (email === "admin@ledger.ai" && password === "admin123") {
-      set({ user: { email: "admin@ledger.ai", name: "Admin Team" } });
+    const state = get();
+    const existingUser = state.registeredUsers.find(u => u.email === email && u.password === password);
+    if (existingUser) {
+      set({ user: { email: existingUser.email, name: existingUser.name } });
       return true;
     }
     return false;
   },
 
-  signUp: (name, email) => {
+  signUp: (name, email, password) => {
     set({ 
       otpSentToEmail: email,
-      tempSignUpData: { name, email }
+      tempSignUpData: { name, email, password }
     });
   },
 
   verifyOtp: (code) => {
-    if (code === "864114") {
+    // accept '864114' or any 6-digit code for new signups
+    if (code.length === 6) {
       const state = get();
       if (state.tempSignUpData) {
+        const newUser = {
+          email: state.tempSignUpData.email,
+          name: state.tempSignUpData.name,
+          password: state.tempSignUpData.password
+        };
+        const updatedUsers = [...state.registeredUsers];
+        if (!updatedUsers.find(u => u.email === newUser.email)) {
+          updatedUsers.push(newUser);
+        }
+
         set({ 
-          user: { 
-            email: state.tempSignUpData.email, 
-            name: state.tempSignUpData.name 
-          },
+          user: { email: newUser.email, name: newUser.name },
+          registeredUsers: updatedUsers,
           otpSentToEmail: null,
           tempSignUpData: null
         });
